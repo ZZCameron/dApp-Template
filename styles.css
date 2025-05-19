@@ -3,7 +3,13 @@
 /* General Styles */
 body {
     background-color: #C0C0C0;
-    font-family: Arial, sans-serif;
+    font-family: Verdana, Geneva, Tahoma, sans-serif;
+}
+
+#wallet-status {
+    font-style: italic;
+    font-weight: bold;
+    font-family: Verdana, Geneva, Tahoma, sans-serif;
 }
 
 .main-content-area {
