@@ -12,11 +12,15 @@
     <script src="buffer.js"></script>
 </head>
 <body>
+    <!-- Testing the message style - for layout verification only -->
+    <div class="warning-message">Warning message layout verification</div>
+    <div class="caution-message">Caution message layout verification</div>
+
     <!-- Wallet Connection Status -->
     <div id="wallet-status">Connecting to wallet ...</div>
 
     <!-- Main App Container -->
-    <main id="app">
+    <main class="main-content-area">
         <!-- Inputs Section -->
         <section id="inputs" aria-label="Inputs Section">
             <!-- Populated by layout.js -->
@@ -28,11 +32,11 @@
         </section>
     </main>
 
-    <section id="controls">
+    <section class="controls">
         <button id="run">Run Model</button>
     </section>
-    <section id="graph">
-        <svg width="600" height="400"></svg>
+    <section class="graph">
+        Graph placeholder
     </section>
  
     <!-- Scripts at the End for DOM Loading -->

@@ -6,12 +6,31 @@ body {
     font-family: Arial, sans-serif;
 }
 
-#error-message {
+.main-content-area {
+    background-color: #ffffff; /* white for now, #C0C0C0 in production */
+    border:  1px solid #000;
+    border-radius: 3px;
+}
+
+.warning-message {
     color: red;
+    text-align: center;
     margin: 20px;
+    padding: 5px;
     font-size: large;
     font-weight: bold;
-    border:  1px solid #000;
+    border:  3px solid #000;
+    border-radius: 3px;
+}
+
+.caution-message {
+    color: yellow;
+    text-align: center;
+    margin: 20px;
+    padding: 5px;
+    font-size: large;
+    font-weight: bold;
+    border:  3px solid #000;
     border-radius: 3px;
 }
 
@@ -168,7 +187,7 @@ body {
 }
 
 /* Controls Section */
-#controls {
+.controls {
     margin: 20px;
     display: flex;
     gap: 10px;
@@ -193,6 +212,17 @@ body {
     background: #00B7EB;
 }
 
+/* Plot */
+.graph {
+    background-color: #fff;    
+    margin: 20px;
+    gap: 10px;
+    text-align: center;
+    padding: 10px;
+    border: 1px solid #000000;
+    width: 800px;
+    height: 600px;
+}
 /* Tooltip */
 .tooltip {
     position: absolute;
