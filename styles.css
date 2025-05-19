@@ -6,6 +6,15 @@ body {
     font-family: Arial, sans-serif;
 }
 
+#error-message {
+    color: red;
+    margin: 20px;
+    font-size: large;
+    font-weight: bold;
+    border:  1px solid #000;
+    border-radius: 3px;
+}
+
 /* Inputs Section */
 #inputs { /* the # is an id selector used to style items with an id="inputs" frequently an input item */
     margin: 20px;

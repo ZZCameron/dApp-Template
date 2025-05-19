@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Retirement dApp</title>
     <link rel="stylesheet" href="styles.css">
     <script src="https://d3js.org/d3.v7.min.js"></script>
@@ -11,15 +12,34 @@
     <script src="buffer.js"></script>
 </head>
 <body>
-    <div id="error-message" style="color: red; margin: 20px;"></div>
-    <section id="inputs"></section>
-    <section id="accounts"></section>
+    <!-- Wallet Connection Status -->
+    <div id="wallet-status">Connecting to wallet ...</div>
+
+    <!-- Main App Container -->
+    <main id="app">
+        <!-- Inputs Section -->
+        <section id="inputs" aria-label="Inputs Section">
+            <!-- Populated by layout.js -->
+        </section>
+
+        <!-- Accounts Section -->
+        <section id="accounts" aria-label="Accounts Section">
+            <!-- Populated by layout.js -->
+        </section>
+    </main>
+
     <section id="controls">
         <button id="run">Run Model</button>
     </section>
     <section id="graph">
         <svg width="600" height="400"></svg>
     </section>
-    
+ 
+    <!-- Scripts at the End for DOM Loading -->
+    <script type="module" src="solanaIntegration.js"></script>
+    <script type="module" src="data.js"></script>
+    <script type="module" src="layout.js"></script>
+    <script type="module" src="eventHandlers.js"></script>
+    <script type="module" src="main.js"></script>   
 </body>
 </html>
