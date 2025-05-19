@@ -1,0 +1,10 @@
+node_modules/
+lib/
+dist/
+*.log
+*.sh
+*.ps1
+package.json
+package-lock.json
+.parcel-cache/
+random_text_for_grok.txt
