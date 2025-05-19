@@ -1,0 +1,1940 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Retirement dApp</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@solana/web3.js@1.91.8/lib/index.iife.min.js"></script>
+    <script src="https://unpkg.com/bn.js@5.2.1/lib/bn.js"></script>
+    <script src="https://unpkg.com/bs58@4.0.1/dist/index.min.js"></script>
+    <script src="buffer.js"></script>
+</head>
+<body>
+    <div id="error-message" style="color: red; margin: 20px;"></div>
+    <section id="inputs"></section>
+    <section id="accounts"></section>
+    <section id="controls">
+        <button id="run">Run Model</button>
+    </section>
+    <section id="graph">
+        <svg width="600" height="400"></svg>
+    </section>
+    <script>
+        // Define State
+        const state = {
+            model: {
+                start_year: 2025,
+                end_year: 2047,
+                pension: 56684,
+                salary: 24000,
+                invest_paid: 6000,
+                spending: 76000,
+                inflation_rate: 5,
+                age: 63,
+                end_age: 85,
+                second_salary: 0,
+                second_salary_start_year: 2025,
+                second_salary_growth_rate: 5,
+                inflation_rate_raw: "5",
+                spread: 2,
+                cyclePeriod: 5,
+                rateModel: 'fixed', // Default rate model
+                accounts: [
+                    {
+                        type: 'RIF',
+                        start_value: 440000,
+                        drawdown_start_year: 2026,
+                        appreciation_rate: 5
+                    },
+                    {
+                        type: 'Business', 
+                        cash_value: 1266032, 
+                        cash_appreciation_rate: 5, 
+                        plant_value: 1000000, 
+                        plant_appreciation_rate: 3, 
+                        sale_year: 2040, 
+                        sale_value: 'default', 
+                        revenue: 20000, 
+                        revenue_increase_rate: 5,
+                        post_sale_revenue: 10000, 
+                        post_sale_revenue_rate: 5
+                    },
+                    {
+                        type: 'RealEstate',
+                        start_value: 500000,
+                        appreciation_rate: 0,
+                        sale_year: 2035,
+                        sale_value: 500000
+                    },
+                    {
+                        type: 'Investment',
+                        start_value: 609947,
+                        appreciation_rate: 0
+                    }
+                ]
+            },
+            setModel(newModel) {
+                this.model = { ...this.model, ...newModel };
+                renderInputs();
+                renderAccounts();
+            },
+            updateField(field, value) {
+                this.model[field] = field === 'inflation_rate' ? Number(value) : value;
+                if (field === 'start_year' || field === 'age' || field === 'end_age') {
+                    const yearsToEnd = Math.max(0, this.model.end_age - this.model.age);
+                    this.model.end_year = this.model.start_year + yearsToEnd;
+                }
+                renderInputs();
+            },
+            updateAccount(index, key, value) {
+                state.model.accounts[index][key] = value;
+                // Remove the renderAccounts call to avoid immediate re-render
+            },
+            addAccount() {
+                const hasRIF = this.model.accounts.some(account => account.type === 'RIF');
+                const defaultType = hasRIF ? 'Investment' : 'RIF';
+                this.model.accounts.push(
+                    defaultType === 'RIF'
+                        ? { type: 'RIF', start_value: 0, drawdown_start_year: this.model.start_year + 1, appreciation_rate: 5 }
+                        : defaultType === 'Business'
+                        ? { 
+                            type: 'Business', 
+                            cash_value: 0, 
+                            cash_appreciation_rate: 5, 
+                            plant_value: 0, 
+                            plant_appreciation_rate: 3, 
+                            sale_year: this.model.start_year, 
+                            sale_value: 'default', 
+                            revenue: 0,
+                            revenue_increase_rate: 5,
+                            post_sale_revenue: 0,
+                            post_sale_revenue_rate: 5
+                        }
+                        : { type: 'Investment', start_value: 0, appreciation_rate: 0 }
+                );
+                renderAccounts();
+                clearPlots();
+            },
+            removeAccount(index) {
+                if (this.model.accounts.length <= 1) return;
+                this.model.accounts.splice(index, 1);
+                renderAccounts();
+                clearPlots();
+            }
+        };
+
+        // Define wallet and the on-chain public key
+        const connection = new window.solanaWeb3.Connection('https://api.devnet.solana.com', 'confirmed');
+        let wallet = { publicKey: null, keypair: null }; // Define wallet globally
+        const PROGRAM_ID = new window.solanaWeb3.PublicKey("52UBAneHVYsa3C2kQiitp6SE4PZJ3nW6jdzcdSvm2yrw");
+    
+       // Add function to clear plot when input parameters are changed
+       function clearPlots() {
+            d3.select("#graph svg").selectAll("*").remove();
+        }
+ 
+        // Add function to keep cursor focused when entering data (debounce)
+        function debounce(func, wait) {
+            let timeout;
+            return function (...args) {
+                clearTimeout(timeout);
+                timeout = setTimeout(() => func.apply(this, args), wait);
+            };
+        }
+
+        // Compute rates
+        function computeRates(startYear, endYear, baseInflationRate, spread = 0, rateModel = 'fixed', cyclePeriod = 5) {
+            const years = endYear - startYear + 1;
+            const inflation_rates = [];
+            const baseRate = baseInflationRate / 100.0;
+
+            if (rateModel === 'fixed') {
+                // Current behavior: constant inflation rate
+                for (let i = 0; i < years; i++) {
+                    inflation_rates.push(baseRate);
+                }
+            } else if (rateModel === 'fixedSpread') {
+                // Fixed with Spread: add random spread (±spread%) to base rate each year
+                const spreadFraction = spread / 100.0;
+                for (let i = 0; i < years; i++) {
+                    const randomSpread = (Math.random() * 2 - 1) * spreadFraction; // Random value between -spread and +spread
+                    const adjustedRate = baseRate + randomSpread;
+                    inflation_rates.push(Math.max(0, adjustedRate)); // Ensure rate isn't negative
+                }
+            } else if (rateModel === 'cyclic') {
+                // Cyclic: apply sinusoidal variation over cyclePeriod
+                const amplitude = baseRate; // Variation amplitude (±100% of base rate, e.g., ±5% for 5% base)
+                const omega = (2 * Math.PI) / cyclePeriod; // Angular frequency
+                for (let i = 0; i < years; i++) {
+                    const yearOffset = i % cyclePeriod;
+                    const variation = amplitude * Math.sin(omega * yearOffset);
+                    const adjustedRate = baseRate + variation;
+                    inflation_rates.push(Math.max(0, adjustedRate)); // Ensure rate isn't negative
+                    // Log the inflation rate for debugging
+                    console.log(`Year ${startYear + i}: Cyclic Inflation Rate: ${(adjustedRate * 100).toFixed(2)}%`);
+                }
+            } else {
+                throw new Error(`Unsupported rate model: ${rateModel}`);
+            }
+
+            return { inflation_rates };
+        }
+
+        // Get the rates for withdrawal of RIF funds from lookup table
+        function get_rif_rate(age) {
+            if (age <= 50) return 0.0;
+            if (age <= 70) return (1.0 / (90.0 - age)) * 100.0;
+            switch (age) {
+                case 71: return 5.28;
+                case 72: return 5.40;
+                case 73: return 5.53;
+                case 74: return 5.67;
+                case 75: return 5.82;
+                case 76: return 5.98;
+                case 77: return 6.17;
+                case 78: return 6.36;
+                case 79: return 6.58;
+                case 80: return 6.82;
+                case 81: return 7.08;
+                case 82: return 7.38;
+                case 83: return 7.71;
+                case 84: return 8.08;
+                case 85: return 8.51;
+                case 86: return 8.99;
+                case 87: return 9.55;
+                case 88: return 10.21;
+                case 89: return 10.99;
+                case 90: return 11.92;
+                case 91: return 13.06;
+                case 92: return 14.49;
+                case 93: return 16.34;
+                case 94: return 18.79;
+                default: return 20.00;
+            }
+        }
+
+        // Helper function to serialize an f64 in little-endian format
+        function serializeF64(value) {
+            const buffer = new ArrayBuffer(8);
+            const view = new DataView(buffer);
+            view.setFloat64(0, value, true);
+            return new Uint8Array(buffer);
+        }
+
+        // Create the input features
+        function renderInputs() {
+            const businessSaleYear = state.model.accounts.find(acc => acc.type === 'Business')?.sale_year || state.model.start_year;
+            const inputsDiv = document.getElementById('inputs');
+            if (!inputsDiv.innerHTML) {
+                inputsDiv.innerHTML = `
+                    <h3>Inputs (currency values in CAD)</h3>
+                    <div class="input-section">
+                        <div class="personal-situation">
+                            <h4>Personal Situation</h4>
+                            <div class="input-row">
+                                <div class="input-column">
+                                    <label>Start Year:</label>
+                                    <input type="number" id="start_year">
+                                    <input type="range" id="start_year_slider">
+                                </div>
+                                <div class="input-column">
+                                    <label>Age:</label>
+                                    <input type="number" id="age">
+                                    <input type="range" id="age_slider">
+                                </div>
+                                <div class="input-column">
+                                    <label>End Age:</label>
+                                    <input type="number" id="end_age">
+                                    <input type="range" id="end_age_slider">
+                                </div>
+                                <div class="input-column">
+                                    <label>End Year:</label>
+                                    <input type="number" id="end_year" readonly>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="incomes">
+                            <h4>Incomes</h4>
+                            <div class="input-row">
+                                <div class="input-column">
+                                    <label>Pension:</label>
+                                    <input type="number" id="pension" class="currency-input">
+                                    <input type="range" id="pension_slider">
+                                </div>
+                                <div class="input-column">
+                                    <label>Investment Income:</label>
+                                    <input type="number" id="invest_paid" class="currency-input">
+                                    <input type="range" id="invest_paid_slider">
+                                </div>
+                                <div class="input-column">
+                                    <label>Salary:</label>
+                                    <input type="number" id="salary" class="currency-input">
+                                    <input type="range" id="salary_slider">
+                                </div>
+                                <div class="input-column">
+                                    <label title="Salary from a second career">Second Salary (CAD):</label>
+                                    <input type="number" id="second_salary" class="currency-input">
+                                    <input type="range" id="second_salary_slider">
+                                    <label title="Year to start receiving second salary">Second Salary Start Year:</label>
+                                    <input type="number" id="second_salary_start_year" value="${businessSaleYear}" readonly>
+                                    <label title="Rate of increase or decrease per year %">Second Salary Growth Rate(%):</label>
+                                    <input type="text" id="second_salary_growth_rate" value="${state.model.second_salary_growth_rate_raw || state.model.second_salary_growth_rate || state.model.inflation_rate}">
+                                </div>
+                            </div>
+                        </div>
+                        <div class="spending">
+                            <h4>Spending</h4>
+                            <div class="input-row">
+                                <div class="input-column">
+                                    <label>Spending:</label>
+                                    <input type="number" id="spending" class="currency-input">
+                                    <input type="range" id="spending_slider">
+                                </div>
+                                <div class="input-column">
+                                    <label>Inflation Rate (%):</label>
+                                    <input type="text" id="inflation_rate" value="${state.model.inflation_rate}">
+                                    <input type="range" id="inflation_rate_slider" min="0" max="100" step="0.1">
+                                </div>
+                                <div class="input-column">
+                                    <label>Rate Model:</label>
+                                    <select id="rate-model">
+                                        <option value="fixed" ${state.model.rateModel === 'fixed' ? 'selected' : ''}>Fixed</option>
+                                        <option value="fixedSpread" ${state.model.rateModel === 'fixedSpread' ? 'selected' : ''}>Fixed with Spread</option>
+                                        <option value="cyclic" ${state.model.rateModel === 'cyclic' ? 'selected' : ''}>Cyclic</option>
+                                    </select>
+                                </div>
+                                <div class="input-column">
+                                    <label>Spread (%):</label>
+                                    <input type="number" id="spread" value="${state.model.spread}" step="0.1">
+                                </div>
+                                <div class="input-column">
+                                    <label>Cycle Period (years):</label>
+                                    <input type="number" id="cycle-period" value="${state.model.cyclePeriod}" min="1">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                attachInputListeners();
+            }
+
+            document.getElementById('start_year').value = state.model.start_year;
+            document.getElementById('start_year_slider').value = state.model.start_year;
+            document.getElementById('age').value = state.model.age;
+            document.getElementById('age_slider').value = state.model.age;
+            document.getElementById('end_age').value = state.model.end_age;
+            document.getElementById('end_age_slider').value = state.model.end_age;
+            document.getElementById('end_year').value = state.model.end_year;
+            document.getElementById('pension').value = state.model.pension;
+            document.getElementById('pension_slider').value = state.model.pension;
+            document.getElementById('invest_paid').value = state.model.invest_paid;
+            document.getElementById('invest_paid_slider').value = state.model.invest_paid;
+            document.getElementById('salary').value = state.model.salary;
+            document.getElementById('salary_slider').value = state.model.salary;
+            document.getElementById('spending').value = state.model.spending;
+            document.getElementById('spending_slider').value = state.model.spending;
+            document.getElementById('inflation_rate').value = state.model.inflation_rate_raw || state.model.inflation_rate.toString();
+            document.getElementById('inflation_rate_slider').value = state.model.inflation_rate;
+            document.getElementById('second_salary').value = state.model.second_salary;
+            document.getElementById('second_salary_slider').value = state.model.second_salary;
+            document.getElementById('second_salary_start_year').value = businessSaleYear;
+            document.getElementById('second_salary_growth_rate').value = state.model.second_salary_growth_rate || state.model.inflation_rate;
+
+            // Set values for new rate model inputs
+            const rateModelSelect = document.getElementById('rate-model');
+            const spreadInput = document.getElementById('spread');
+            const cyclePeriodInput = document.getElementById('cycle-period');
+            if (rateModelSelect) rateModelSelect.value = state.model.rateModel || 'fixed';
+            if (spreadInput) spreadInput.value = state.model.spread || 2;
+            if (cyclePeriodInput) cyclePeriodInput.value = state.model.cyclePeriod || 5;
+        }
+
+        // const needed to retain focus location if page re-renders
+        const pendingInputUpdates = {};
+
+        // Define the debounce object to allow for full text box entries before blur
+        const applyInputUpdates = debounce(() => {
+            Object.keys(pendingInputUpdates).forEach(key => {
+                const [id, value] = pendingInputUpdates[key];
+                const config = configs.find(c => c.id === id);
+                if (value < config.min) value = config.min;
+                if (value > config.max) value = config.max;
+                if (id !== 'end_age') {
+                    state.updateField(id, value);
+                }
+                if (config.onChange) config.onChange(value);
+            });
+            renderInputs();
+        }, 300);
+
+        // Input values stored to allow for update without re-rendering page
+        const configs = [
+            { id: 'start_year', min: 2000, max: 2070, step: 1, onChange: (value) => {
+                state.model.end_year = value + (Number(document.getElementById('end_age').value) - state.model.age);
+                document.getElementById('end_year').value = state.model.end_year;
+            }},
+            { id: 'age', min: 0, max: 150, step: 1, onChange: (value) => {
+                state.model.end_year = state.model.start_year + (Number(document.getElementById('end_age').value) - value);
+                document.getElementById('end_year').value = state.model.end_year;
+                document.getElementById('end_age').setAttribute('min', value);
+            }},
+            { id: 'end_age', min: state.model.age, max: 150, step: 1, onChange: (value) => {
+                state.model.end_year = state.model.start_year + (value - state.model.age);
+                document.getElementById('end_year').value = state.model.end_year;
+            }},
+            { id: 'pension', min: 0, max: 500000 },
+            { id: 'invest_paid', min: 0, max: 500000 },
+            { id: 'salary', min: 0, max: 500000 },
+            { id: 'spending', min: 0, max: 500000 },
+            { id: 'inflation_rate', min: 0, max: 100, step: 0.1 },
+            { id: 'second_salary', min: 0, max: 500000 },
+            { id: 'second_salary_start_year', min: 2000, max: 2070, step: 1 },
+            { id: 'second_salary_growth_rate', min: -100, max: 100, step: 0.1 }
+        ];
+
+        // Create and assign code to bring the data to the dApp
+        function attachInputListeners() {
+            const startYearInput = document.getElementById('start_year');
+            const startYearSlider = document.getElementById('start_year_slider');
+            const ageInput = document.getElementById('age');
+            const ageSlider = document.getElementById('age_slider');
+            const endAgeInput = document.getElementById('end_age');
+            const endAgeSlider = document.getElementById('end_age_slider');
+            const pensionInput = document.getElementById('pension');
+            const pensionSlider = document.getElementById('pension_slider');
+            const investPaidInput = document.getElementById('invest_paid');
+            const investPaidSlider = document.getElementById('invest_paid_slider');
+            const salaryInput = document.getElementById('salary');
+            const salarySlider = document.getElementById('salary_slider');
+            const secondSalaryInput = document.getElementById('second_salary');
+            const secondSalarySlider = document.getElementById('second_salary_slider');
+            const secondSalaryGrowthRateInput = document.getElementById('second_salary_growth_rate');
+            const spendingInput = document.getElementById('spending');
+            const spendingSlider = document.getElementById('spending_slider');
+            const inflationInput = document.getElementById('inflation_rate');
+            const inflationSlider = document.getElementById('inflation_rate_slider');
+            const rateModelSelect = document.getElementById('rate-model');
+            const spreadInput = document.getElementById('spread');
+            const cyclePeriodInput = document.getElementById('cycle-period');
+
+            // Existing listeners (unchanged)
+            if (startYearInput && startYearSlider) {
+                startYearInput.addEventListener('input', (e) => {
+                    let value = Number(e.target.value);
+                    if (isNaN(value)) return;
+                    if (value < 1970) value = 1970;
+                    if (value > 2100) value = 2100;
+                    state.updateField('start_year', value);
+                    state.updateField('end_year', value + (state.model.end_age - state.model.age));
+                    startYearSlider.value = value;
+                    renderInputs();
+                    clearPlots();
+                });
+                startYearSlider.addEventListener('input', (e) => {
+                    const value = Number(e.target.value);
+                    state.updateField('start_year', value);
+                    state.updateField('end_year', value + (state.model.end_age - state.model.age));
+                    startYearInput.value = value;
+                    renderInputs();
+                    clearPlots();
+                });
+            }
+
+            if (ageInput && ageSlider) {
+                ageInput.addEventListener('input', (e) => {
+                    let value = Number(e.target.value);
+                    if (isNaN(value)) return;
+                    if (value < 0) value = 0;
+                    if (value > 120) value = 120;
+                    state.updateField('age', value);
+                    state.updateField('end_year', state.model.start_year + (state.model.end_age - value));
+                    ageSlider.value = value;
+                    renderInputs();
+                    clearPlots();
+                });
+                ageSlider.addEventListener('input', (e) => {
+                    const value = Number(e.target.value);
+                    state.updateField('age', value);
+                    state.updateField('end_year', state.model.start_year + (state.model.end_age - value));
+                    ageInput.value = value;
+                    renderInputs();
+                    clearPlots();
+                });
+            }
+
+            if (endAgeInput && endAgeSlider) {
+                endAgeInput.addEventListener('input', (e) => {
+                    let value = Number(e.target.value);
+                    if (isNaN(value)) return;
+                    if (value < state.model.age) value = state.model.age;
+                    if (value > 120) value = 120;
+                    state.updateField('end_age', value);
+                    state.updateField('end_year', state.model.start_year + (value - state.model.age));
+                    endAgeSlider.value = value;
+                    renderInputs();
+                    clearPlots();
+                });
+                endAgeSlider.addEventListener('input', (e) => {
+                    const value = Number(e.target.value);
+                    state.updateField('end_age', value);
+                    state.updateField('end_year', state.model.start_year + (value - state.model.age));
+                    endAgeInput.value = value;
+                    renderInputs();
+                    clearPlots();
+                });
+            }
+
+            if (pensionInput && pensionSlider) {
+                pensionInput.addEventListener('input', (e) => {
+                    const value = Number(e.target.value);
+                    if (!isNaN(value) && value >= 0) {
+                        state.updateField('pension', value);
+                        pensionSlider.value = value;
+                        clearPlots();
+                    }
+                });
+                pensionSlider.addEventListener('input', (e) => {
+                    const value = Number(e.target.value);
+                    state.updateField('pension', value);
+                    pensionInput.value = value;
+                    clearPlots();
+                });
+            }
+
+            if (investPaidInput && investPaidSlider) {
+                investPaidInput.addEventListener('input', (e) => {
+                    const value = Number(e.target.value);
+                    if (!isNaN(value) && value >= 0) {
+                        state.updateField('invest_paid', value);
+                        investPaidSlider.value = value;
+                        clearPlots();
+                    }
+                });
+                investPaidSlider.addEventListener('input', (e) => {
+                    const value = Number(e.target.value);
+                    state.updateField('invest_paid', value);
+                    investPaidInput.value = value;
+                    clearPlots();
+                });
+            }
+
+            if (salaryInput && salarySlider) {
+                salaryInput.addEventListener('input', (e) => {
+                    const value = Number(e.target.value);
+                    if (!isNaN(value) && value >= 0) {
+                        state.updateField('salary', value);
+                        salarySlider.value = value;
+                        clearPlots();
+                    }
+                });
+                salarySlider.addEventListener('input', (e) => {
+                    const value = Number(e.target.value);
+                    state.updateField('salary', value);
+                    salaryInput.value = value;
+                    clearPlots();
+                });
+            }
+
+            if (secondSalaryInput && secondSalarySlider) {
+                secondSalaryInput.addEventListener('input', (e) => {
+                    const value = Number(e.target.value);
+                    if (!isNaN(value) && value >= 0) {
+                        state.updateField('second_salary', value);
+                        secondSalarySlider.value = value;
+                        clearPlots();
+                    }
+                });
+                secondSalarySlider.addEventListener('input', (e) => {
+                    const value = Number(e.target.value);
+                    state.updateField('second_salary', value);
+                    secondSalaryInput.value = value;
+                    clearPlots();
+                });
+            }
+
+            if (secondSalaryGrowthRateInput) {
+                secondSalaryGrowthRateInput.addEventListener('input', (e) => {
+                    const value = Number(e.target.value);
+                    if (!isNaN(value)) {
+                        state.updateField('second_salary_growth_rate', value);
+                        state.updateField('second_salary_growth_rate_raw', e.target.value);
+                        clearPlots();
+                    }
+                });
+            }
+
+            if (spendingInput && spendingSlider) {
+                spendingInput.addEventListener('input', (e) => {
+                    const value = Number(e.target.value);
+                    if (!isNaN(value) && value >= 0) {
+                        state.updateField('spending', value);
+                        spendingSlider.value = value;
+                        clearPlots();
+                    }
+                });
+                spendingSlider.addEventListener('input', (e) => {
+                    const value = Number(e.target.value);
+                    state.updateField('spending', value);
+                    spendingInput.value = value;
+                    clearPlots();
+                });
+            }
+
+            if (inflationInput && inflationSlider) {
+                inflationSlider.value = state.model.inflation_rate;
+                inflationInput.addEventListener('input', (e) => {
+                    state.updateField('inflation_rate_raw', e.target.value);
+                    let numValue = Number(e.target.value);
+                    if (!isNaN(numValue)) {
+                        if (numValue < 0) numValue = 0;
+                        if (numValue > 100) numValue = 100;
+                        console.log(`Updating inflation rate to: ${numValue}%`);
+                        state.updateField('inflation_rate', numValue);
+                        inflationSlider.value = numValue;
+                    }
+                    clearPlots();
+                });
+                inflationSlider.addEventListener('input', (e) => {
+                    const value = Number(e.target.value);
+                    console.log(`Updating inflation rate to: ${value}%`);
+                    state.updateField('inflation_rate', value);
+                    state.updateField('inflation_rate_raw', value.toString());
+                    inflationInput.value = value;
+                    clearPlots();
+                });
+            }
+
+            if (rateModelSelect) {
+                rateModelSelect.addEventListener('change', (e) => {
+                    console.log(`Rate model changed to: ${e.target.value}`);
+                    state.updateField('rateModel', e.target.value);
+                    clearPlots();
+                });
+            }
+
+            if (spreadInput) {
+                spreadInput.addEventListener('input', (e) => {
+                    const value = Number(e.target.value);
+                    console.log(`Updating spread to: ${value}%`);
+                    state.updateField('spread', value);
+                    clearPlots();
+                });
+            }
+
+            if (cyclePeriodInput) {
+                cyclePeriodInput.addEventListener('input', (e) => {
+                    const value = Math.max(1, Number(e.target.value));
+                    console.log(`Updating cycle period to: ${value} years`);
+                    state.updateField('cyclePeriod', value);
+                    cyclePeriodInput.value = value;
+                    clearPlots();
+                });
+            }
+        }
+
+        // Define pendingUpdates and applyUpdatesAndRender at a higher scope
+        const pendingUpdates = {};
+
+        // Establish a debounce to allow entry in text boxes without immediate page render
+        const applyUpdatesAndRender = debounce(() => {
+            Object.keys(pendingUpdates).forEach(key => {
+                const [index, field] = key.split(':');
+                const value = pendingUpdates[key];
+                state.updateAccount(Number(index), field, value);
+            });
+            renderAccounts();
+        }, 300);
+        
+        // Create the accounts for manipulating data
+        function renderAccounts() {
+            const accountsDiv = document.getElementById('accounts');
+            accountsDiv.innerHTML = '<h3>Accounts</h3>';
+
+            if (window.accountListeners) {
+                window.accountListeners.forEach(listener => listener.element.removeEventListener(listener.event, listener.handler));
+            }
+            window.accountListeners = [];
+
+            state.model.accounts.forEach((account, index) => {
+                const accountDiv = document.createElement('div');
+                accountDiv.className = 'account';
+
+                let accountFields = '<div class="account-container">';
+                if (account.type === 'RIF') {
+                    accountFields += `
+                        <div class="account-row">
+                            <div class="account-column">
+                                <label>Account Type:</label>
+                                <select id="account_type_${index}">
+                                    <option value="RIF" ${account.type === 'RIF' ? 'selected' : ''}>RIF</option>
+                                    <option value="Business">Business</option>
+                                    <option value="RealEstate">Real Estate</option>
+                                    <option value="Investment">Investment</option>
+                                </select>
+                            </div>
+                            <div class="account-column">
+                                <label title="Initial balance of the RIF account">Start Value (CAD):</label>
+                                <input type="number" id="start_value_${index}" value="${account.start_value}" min="0" class="currency-input">
+                            </div>
+                            <div class="account-column">
+                                <label title="Year to start withdrawing from the RIF">Drawdown Start Year:</label>
+                                <input type="number" id="drawdown_start_year_${index}" value="${account.drawdown_start_year}" min="${state.model.start_year}" max="${state.model.end_year}" step="1">
+                            </div>
+                            <div class="account-column">
+                                <label title="Annual growth rate of the RIF balance">Appreciation Rate (%):</label>
+                                <input type="number" id="appreciation_rate_${index}" value="${account.appreciation_rate}" min="0" max="100" step="0.1">
+                            </div>
+                            <div class="account-column account-actions">
+                                ${state.model.accounts.length > 1 ? `<button id="remove_${index}" class="remove-button">Remove</button>` : ''}
+                            </div>
+                        </div>
+                    `;
+                } else if (account.type === 'Business') {
+                    accountFields += `
+                        <div class="account-row">
+                            <div class="account-column">
+                                <label>Account Type:</label>
+                                <select id="account_type_${index}">
+                                    <option value="RIF">RIF</option>
+                                    <option value="Business" ${account.type === 'Business' ? 'selected' : ''}>Business</option>
+                                    <option value="RealEstate">Real Estate</option>
+                                    <option value="Investment">Investment</option>
+                                </select>
+                            </div>
+                            <div class="account-column">
+                                <label title="Initial cash value of the business">Cash Value (CAD):</label>
+                                <input type="number" id="cash_value_${index}" value="${account.cash_value}" min="0" class="currency-input">
+                                <label title="Initial value of the business's physical assets">Plant Value (CAD):</label>
+                                <input type="number" id="plant_value_${index}" value="${account.plant_value}" min="0" class="currency-input">
+                            </div>
+                            <div class="account-column">
+                                <label title="Annual growth rate of the cash value">Cash Appr. Rate (%):</label>
+                                <input type="number" id="cash_appreciation_rate_${index}" value="${account.cash_appreciation_rate || state.model.inflation_rate}" min="0" max="100" step="0.1">
+                                <label title="Annual growth rate of the plant value">Plant Appr. Rate (%):</label>
+                                <input type="number" id="plant_appreciation_rate_${index}" value="${account.plant_appreciation_rate || state.model.inflation_rate}" min="0" max="100" step="0.1">
+                            </div>
+                            <div class="account-column">
+                                <label title="Annual revenue received by the business before sale, split between salary and cash balance">Revenue (CAD):</label>
+                                <input type="number" id="revenue_${index}" value="${account.revenue || 0}" min="0" class="currency-input">
+                                <label title="Annual increase rate for business revenue before sale (%)">Revenue Increase Rate (%):</label>
+                                <input type="number" id="revenue_increase_rate_${index}" value="${account.revenue_increase_rate || state.model.inflation_rate}" min="-100" max="100" step="0.1">
+                            </div>
+                            <div class="account-column">
+                                <label title="Annual residual income received after selling the business">Post-Sale Revenue (CAD):</label>
+                                <input type="number" id="post_sale_revenue_${index}" value="${account.post_sale_revenue || 0}" min="0" class="currency-input">
+                                <label title="Annual change in post-sale revenue (%)">Post-Sale Rev. Rate (%):</label>
+                                <input type="number" id="post_sale_revenue_rate_${index}" value="${account.post_sale_revenue_rate || state.model.inflation_rate}" min="-100" max="100" step="0.1">
+                            </div>
+                            <div class="account-column">
+                                <label title="Year to sell the business">Sale Year:</label>
+                                <input type="number" id="sale_year_${index}" value="${account.sale_year}" min="0" max="2070" step="1">
+                                <label title="Value received upon selling the business">Sale Value (CAD):</label>
+                                <input type="text" id="sale_value_${index}" value="${account.sale_value === 'default' ? 'default' : account.sale_value}" class="currency-input">
+                            </div>
+                            <div class="account-column account-actions">
+                                ${state.model.accounts.length > 1 ? `<button id="remove_${index}" class="remove-button">Remove</button>` : ''}
+                            </div>
+                        </div>
+                    `;
+                } else if (account.type === 'RealEstate') {
+                    accountFields += `
+                        <div class="account-row">
+                            <div class="account-column">
+                                <label>Account Type:</label>
+                                <select id="account_type_${index}">
+                                    <option value="RIF">RIF</option>
+                                    <option value="Business">Business</option>
+                                    <option value="RealEstate" ${account.type === 'RealEstate' ? 'selected' : ''}>Real Estate</option>
+                                    <option value="Investment">Investment</option>
+                                </select>
+                            </div>
+                            <div class="account-column">
+                                <label title="Initial value of the real estate">Start Value (CAD):</label>
+                                <input type="number" id="start_value_${index}" value="${account.start_value}" min="0" class="currency-input">
+                            </div>
+                            <div class="account-column">
+                                <label title="Annual growth rate of the real estate value">Appreciation Rate (%):</label>
+                                <input type="number" id="appreciation_rate_${index}" value="${account.appreciation_rate || 0}" min="0" max="100" step="0.1">
+                            </div>
+                            <div class="account-column">
+                                <label title="Year to sell the real estate">Sale Year:</label>
+                                <input type="number" id="sale_year_${index}" value="${account.sale_year}" min="0" max="2070" step="1">
+                            </div>
+                            <div class="account-column">
+                                <label title="Value received upon selling the real estate">Sale Value (CAD):</label>
+                                <input type="number" id="sale_value_${index}" value="${account.sale_value}" min="0" class="currency-input">
+                            </div>
+                            <div class="account-column account-actions">
+                                ${state.model.accounts.length > 1 ? `<button id="remove_${index}" class="remove-button">Remove</button>` : ''}
+                            </div>
+                        </div>
+                    `;
+                } else {
+                    accountFields += `
+                        <div class="account-row">
+                            <div class="account-column">
+                                <label>Account Type:</label>
+                                <select id="account_type_${index}">
+                                    <option value="RIF">RIF</option>
+                                    <option value="Business">Business</option>
+                                    <option value="RealEstate">Real Estate</option>
+                                    <option value="Investment" ${account.type === 'Investment' ? 'selected' : ''}>Investment</option>
+                                </select>
+                            </div>
+                            <div class="account-column">
+                                <label title="Initial balance of the investment account">Start Value (CAD):</label>
+                                <input type="number" id="start_value_${index}" value="${account.start_value}" min="0" class="currency-input">
+                            </div>
+                            <div class="account-column">
+                                <label title="Annual growth rate of the investment balance">Appreciation Rate (%):</label>
+                                <input type="number" id="appreciation_rate_${index}" value="${account.appreciation_rate || 0}" min="0" max="100" step="0.1">
+                            </div>
+                            <div class="account-column account-actions">
+                                ${state.model.accounts.length > 1 ? `<button id="remove_${index}" class="remove-button">Remove</button>` : ''}
+                            </div>
+                        </div>
+                    `;
+                }
+                // accountFields += '</div>';
+                accountDiv.innerHTML = accountFields;
+                accountsDiv.appendChild(accountDiv);
+            });
+
+            const addButtonDiv = document.createElement('div');
+            addButtonDiv.className = 'add-button';
+            addButtonDiv.innerHTML = '<button>Add Account</button>';
+            addButtonDiv.querySelector('button').addEventListener('click', () => {
+                const newAccountIndex = state.model.accounts.length; // Index of the new account
+                state.addAccount();
+                renderAccounts();
+                clearPlots();
+                // Focus the new account's account_type field
+                const newAccountType = document.getElementById(`account_type_${newAccountIndex}`);
+                if (newAccountType) {
+                    setTimeout(() => {
+                        newAccountType.focus();
+                        console.log(`Focus: Auto-focused new account type: account_type_${newAccountIndex}`);
+                    }, 100); // Increased delay to ensure DOM is ready
+                } else {
+                    // Fallback to the first account's account_type if the new one isn't found
+                    const firstAccountType = document.getElementById('account_type_0');
+                    if (firstAccountType) {
+                        setTimeout(() => {
+                            firstAccountType.focus();
+                            console.log(`Focus: Fallback to first account type: account_type_0`);
+                        }, 100);
+                    }
+                }
+            });
+            accountsDiv.appendChild(addButtonDiv);
+
+            state.model.accounts.forEach((account, index) => {
+                const typeElement = document.getElementById(`account_type_${index}`);
+                const startValueElement = document.getElementById(`start_value_${index}`);
+                const drawdownStartYearElement = document.getElementById(`drawdown_start_year_${index}`);
+                const appreciationRateElement = document.getElementById(`appreciation_rate_${index}`);
+                const cashValueElement = document.getElementById(`cash_value_${index}`);
+                const cashAppreciationRateElement = document.getElementById(`cash_appreciation_rate_${index}`);
+                const plantValueElement = document.getElementById(`plant_value_${index}`);
+                const plantAppreciationRateElement = document.getElementById(`plant_appreciation_rate_${index}`);
+                const revenueElement = document.getElementById(`revenue_${index}`);
+                const revenueIncreaseRateElement = document.getElementById(`revenue_increase_rate_${index}`);
+                const postSaleRevenueElement = document.getElementById(`post_sale_revenue_${index}`);
+                const postSaleRevenueRateElement = document.getElementById(`post_sale_revenue_rate_${index}`);
+                const saleYearElement = document.getElementById(`sale_year_${index}`);
+                const saleValueElement = document.getElementById(`sale_value_${index}`);
+                const removeButton = document.getElementById(`remove_${index}`);
+
+                const typeHandler = (e) => {
+                    const newType = e.target.value;
+                    const hasRIF = state.model.accounts.some((acc, idx) => idx !== index && acc.type === 'RIF');
+                    if (newType === 'RIF' && hasRIF) {
+                        const errorDiv = document.getElementById('error-message');
+                        if (errorDiv) {
+                            errorDiv.textContent = 'Only one RIF account is allowed.';
+                        }
+                        e.target.value = state.model.accounts[index].type;
+                        return;
+                    }
+                    state.model.accounts[index] = {
+                        type: newType,
+                        ...(newType === 'RIF' ? { start_value: 0, drawdown_start_year: state.model.start_year + 1, appreciation_rate: 5 } :
+                            newType === 'Business' ? { 
+                                cash_value: 0, 
+                                cash_appreciation_rate: 5, 
+                                plant_value: 0, 
+                                plant_appreciation_rate: 3, 
+                                sale_year: state.model.start_year, 
+                                sale_value: 'default', 
+                                revenue: 0,
+                                revenue_increase_rate: 5,
+                                post_sale_revenue: 0,
+                                post_sale_revenue_rate: 5
+                            } :
+                            newType === 'RealEstate' ? { start_value: 0, appreciation_rate: 0, sale_year: 0, sale_value: 0 } :
+                            { start_value: 0, appreciation_rate: 0 })
+                    };
+                    renderAccounts();
+                    clearPlots();
+                    // Restore focus to the updated account's account_type field
+                    const updatedTypeElement = document.getElementById(`account_type_${index}`);
+                    if (updatedTypeElement) {
+                        setTimeout(() => {
+                            updatedTypeElement.focus();
+                            console.log(`Focus: After type change, restored to: account_type_${index}`);
+                        }, 100);
+                    }
+                };
+
+                const handleInput = (key, value, text = false) => {
+                    let parsedValue = text ? value : Number(value);
+                    if (!text && (isNaN(parsedValue) || (key !== 'revenue_increase_rate' && key !== 'post_sale_revenue_rate' && parsedValue < 0))) {
+                        errorDiv.textContent = `Invalid value for ${key}`;
+                        return;
+                    }
+                    if (key === 'post_sale_revenue_rate' && (parsedValue < -100 || parsedValue > 100)) {
+                        errorDiv.textContent = `Post-sale revenue rate must be between -100% and 100%`;
+                        return;
+                    }
+                    if (text && key === 'sale_value' && value !== 'default') {
+                        parsedValue = Number(value);
+                        if (isNaN(parsedValue) || parsedValue < 0) {
+                            errorDiv.textContent = `Invalid sale value`;
+                            return;
+                        }
+                    }
+                    console.log(`Updating account ${index} with key ${key} = ${parsedValue}`);
+                    state.updateAccount(index, key, text ? parsedValue : parsedValue);
+                };
+
+                const handleInputEvent = (e) => {
+                    const input = e.target;
+                    const key = input.id.split('_').slice(0, -1).join('_');
+                    const value = input.value;
+                    handleInput(key, value, key === 'sale_value');
+                    setTimeout(() => {
+                        input.focus();
+                    }, 0);
+                };
+
+                const handleBlur = (e) => {
+                    const input = e.target;
+                    const key = input.id.split('_').slice(0, -1).join('_');
+                    const value = input.value;
+                    handleInput(key, value, key === 'sale_value');
+                    clearPlots();
+                };
+
+                const handleKeyDown = (e) => {
+                    if (e.key === 'Enter' || e.key === 'Tab') {
+                        e.preventDefault();
+                        const accountRow = e.target.closest('.account-row');
+                        const currentAccount = e.target.closest('.account');
+                        if (!accountRow || !currentAccount) return;
+
+                        console.log(`Focus: Current input ID: ${e.target.id}, Element: ${e.target.tagName}`);
+
+                        // Include inputs, selects, but exclude the Remove button for Enter key navigation
+                        const inputs = Array.from(accountRow.querySelectorAll('input, select'));
+                        const removeButton = accountRow.querySelector('.remove-button');
+                        const focusableElements = e.key === 'Enter' ? inputs : [...inputs, ...(removeButton ? [removeButton] : [])];
+                        const currentIndex = focusableElements.indexOf(e.target);
+                        let nextElement = focusableElements[currentIndex + 1];
+
+                        if (nextElement) {
+                            console.log(`Focus: Moving to next element in same account: ${nextElement.id || nextElement.className}`);
+                            setTimeout(() => {
+                                nextElement.focus();
+                                if (nextElement.tagName === 'INPUT') nextElement.select();
+                            }, 50);
+                        } else {
+                            // Move to the next account's first input or Add Account button
+                            const allAccounts = Array.from(document.querySelectorAll('#accounts .account'));
+                            const currentAccountIndex = allAccounts.indexOf(currentAccount);
+                            const nextAccount = allAccounts[currentAccountIndex + 1];
+                            if (nextAccount) {
+                                const firstInput = nextAccount.querySelector('input, select');
+                                if (firstInput) {
+                                    console.log(`Focus: Moving to next account's first input: ${firstInput.id}`);
+                                    setTimeout(() => {
+                                        firstInput.focus();
+                                        if (firstInput.tagName === 'INPUT') firstInput.select();
+                                    }, 50);
+                                }
+                            } else {
+                                const addButton = document.querySelector('.add-button button');
+                                if (addButton) {
+                                    console.log(`Focus: Moving to Add Account button`);
+                                    setTimeout(() => {
+                                        addButton.focus();
+                                    }, 50);
+                                }
+                            }
+                        }
+                    }
+                };
+
+                const removeHandler = (e) => {
+                    state.removeAccount(index);
+                    renderAccounts();
+                    clearPlots();
+                    const allAccounts = Array.from(document.querySelectorAll('#accounts .account'));
+                    if (allAccounts.length === 0) {
+                        const addButton = document.querySelector('.add-button button');
+                        if (addButton) {
+                            console.log(`Focus: After remove, focusing Add Account button (no accounts remain)`);
+                            setTimeout(() => {
+                                addButton.focus();
+                            }, 50);
+                        }
+                    } else {
+                        const nextAccount = allAccounts[index] || allAccounts[allAccounts.length - 1];
+                        const firstInput = nextAccount.querySelector('input, select');
+                        if (firstInput) {
+                            console.log(`Focus: After remove, focusing next account's first input: ${firstInput.id}`);
+                            setTimeout(() => {
+                                firstInput.focus();
+                                if (firstInput.tagName === 'INPUT') firstInput.select();
+                            }, 50);
+                        }
+                    }
+                };
+
+                typeElement.addEventListener('change', (e) => {
+                    typeHandler(e);
+                    const accountRow = typeElement.closest('.account-row');
+                    if (accountRow) {
+                        const inputs = Array.from(accountRow.querySelectorAll('input, select'));
+                        const nextField = inputs[inputs.indexOf(typeElement) + 1];
+                        if (nextField) {
+                            console.log(`Focus: After account type selection, moving to: ${nextField.id}`);
+                            setTimeout(() => {
+                                nextField.focus();
+                                if (nextField.tagName === 'INPUT') nextField.select();
+                            }, 50);
+                        }
+                    }
+                });
+
+                typeElement.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter') {
+                        e.preventDefault(); // Prevent dropdown toggle
+                        const accountRow = typeElement.closest('.account-row');
+                        if (accountRow) {
+                            const inputs = Array.from(accountRow.querySelectorAll('input, select'));
+                            const nextField = inputs[inputs.indexOf(typeElement) + 1];
+                            if (nextField) {
+                                console.log(`Focus: Enter on account type, moving to: ${nextField.id}`);
+                                setTimeout(() => {
+                                    nextField.focus();
+                                    if (nextField.tagName === 'INPUT') nextField.select();
+                                }, 50);
+                            }
+                        }
+                    }
+                });
+
+                if (startValueElement) {
+                    startValueElement.addEventListener('input', handleInputEvent);
+                    startValueElement.addEventListener('blur', handleBlur);
+                    startValueElement.addEventListener('keydown', handleKeyDown);
+                }
+                if (drawdownStartYearElement) {
+                    drawdownStartYearElement.addEventListener('input', handleInputEvent);
+                    drawdownStartYearElement.addEventListener('blur', handleBlur);
+                    drawdownStartYearElement.addEventListener('keydown', handleKeyDown);
+                }
+                if (appreciationRateElement) {
+                    appreciationRateElement.addEventListener('input', handleInputEvent);
+                    appreciationRateElement.addEventListener('blur', handleBlur);
+                    appreciationRateElement.addEventListener('keydown', handleKeyDown);
+                }
+                if (cashValueElement) {
+                    cashValueElement.addEventListener('input', handleInputEvent);
+                    cashValueElement.addEventListener('blur', handleBlur);
+                    cashValueElement.addEventListener('keydown', handleKeyDown);
+                }
+                if (cashAppreciationRateElement) {
+                    cashAppreciationRateElement.addEventListener('input', handleInputEvent);
+                    cashAppreciationRateElement.addEventListener('blur', handleBlur);
+                    cashAppreciationRateElement.addEventListener('keydown', handleKeyDown);
+                }
+                if (plantValueElement) {
+                    plantValueElement.addEventListener('input', handleInputEvent);
+                    plantValueElement.addEventListener('blur', handleBlur);
+                    plantValueElement.addEventListener('keydown', handleKeyDown);
+                }
+                if (plantAppreciationRateElement) {
+                    plantAppreciationRateElement.addEventListener('input', handleInputEvent);
+                    plantAppreciationRateElement.addEventListener('blur', handleBlur);
+                    plantAppreciationRateElement.addEventListener('keydown', handleKeyDown);
+                }
+                if (revenueElement) {
+                    revenueElement.addEventListener('input', handleInputEvent);
+                    revenueElement.addEventListener('blur', handleBlur);
+                    revenueElement.addEventListener('keydown', handleKeyDown);
+                }
+                if (revenueIncreaseRateElement) {
+                    revenueIncreaseRateElement.addEventListener('input', handleInputEvent);
+                    revenueIncreaseRateElement.addEventListener('blur', handleBlur);
+                    revenueIncreaseRateElement.addEventListener('keydown', handleKeyDown);
+                }
+                if (postSaleRevenueElement) {
+                    postSaleRevenueElement.addEventListener('input', handleInputEvent);
+                    postSaleRevenueElement.addEventListener('blur', handleBlur);
+                    postSaleRevenueElement.addEventListener('keydown', handleKeyDown);
+                }
+                if (postSaleRevenueRateElement) {
+                    postSaleRevenueRateElement.addEventListener('input', handleInputEvent);
+                    postSaleRevenueRateElement.addEventListener('blur', handleBlur);
+                    postSaleRevenueRateElement.addEventListener('keydown', handleKeyDown);
+                }
+                if (saleYearElement) {
+                    saleYearElement.addEventListener('input', handleInputEvent);
+                    saleYearElement.addEventListener('blur', handleBlur);
+                    saleYearElement.addEventListener('keydown', handleKeyDown);
+                }
+                if (saleValueElement) {
+                    saleValueElement.addEventListener('input', handleInputEvent);
+                    saleValueElement.addEventListener('blur', handleBlur);
+                    saleValueElement.addEventListener('keydown', handleKeyDown);
+                }
+                if (removeButton) {
+                    removeButton.addEventListener('click', removeHandler);
+                    removeButton.addEventListener('keydown', (e) => {
+                        if (e.key === 'Enter') {
+                            e.preventDefault(); // Prevent Enter from activating the button
+                        }
+                        if (e.key === 'Space') {
+                            console.log(`Focus: Space pressed on remove button for account ${index}`);
+                            removeHandler(e);
+                        }
+                    });
+                }
+
+                window.accountListeners.push(
+                    { element: typeElement, event: 'change', handler: (e) => {
+                        typeHandler(e);
+                        const accountRow = typeElement.closest('.account-row');
+                        if (accountRow) {
+                            const inputs = Array.from(accountRow.querySelectorAll('input, select'));
+                            const nextField = inputs[inputs.indexOf(typeElement) + 1];
+                            if (nextField) {
+                                console.log(`Focus: After account type selection, moving to: ${nextField.id}`);
+                                setTimeout(() => {
+                                    nextField.focus();
+                                    if (nextField.tagName === 'INPUT') nextField.select();
+                                }, 50);
+                            }
+                        }
+                    }},
+                    { element: typeElement, event: 'keydown', handler: (e) => {
+                        if (e.key === 'Enter') {
+                            e.preventDefault();
+                            const accountRow = typeElement.closest('.account-row');
+                            if (accountRow) {
+                                const inputs = Array.from(accountRow.querySelectorAll('input, select'));
+                                const nextField = inputs[inputs.indexOf(typeElement) + 1];
+                                if (nextField) {
+                                    console.log(`Focus: Enter on account type, moving to: ${nextField.id}`);
+                                    setTimeout(() => {
+                                        nextField.focus();
+                                        if (nextField.tagName === 'INPUT') nextField.select();
+                                    }, 50);
+                                }
+                            }
+                        }
+                    }},
+                    ...(startValueElement ? [
+                        { element: startValueElement, event: 'input', handler: handleInputEvent },
+                        { element: startValueElement, event: 'blur', handler: handleBlur },
+                        { element: startValueElement, event: 'keydown', handler: handleKeyDown }
+                    ] : []),
+                    ...(drawdownStartYearElement ? [
+                        { element: drawdownStartYearElement, event: 'input', handler: handleInputEvent },
+                        { element: drawdownStartYearElement, event: 'blur', handler: handleBlur },
+                        { element: drawdownStartYearElement, event: 'keydown', handler: handleKeyDown }
+                    ] : []),
+                    ...(appreciationRateElement ? [
+                        { element: appreciationRateElement, event: 'input', handler: handleInputEvent },
+                        { element: appreciationRateElement, event: 'blur', handler: handleBlur },
+                        { element: appreciationRateElement, event: 'keydown', handler: handleKeyDown }
+                    ] : []),
+                    ...(cashValueElement ? [
+                        { element: cashValueElement, event: 'input', handler: handleInputEvent },
+                        { element: cashValueElement, event: 'blur', handler: handleBlur },
+                        { element: cashValueElement, event: 'keydown', handler: handleKeyDown }
+                    ] : []),
+                    ...(cashAppreciationRateElement ? [
+                        { element: cashAppreciationRateElement, event: 'input', handler: handleInputEvent },
+                        { element: cashAppreciationRateElement, event: 'blur', handler: handleBlur },
+                        { element: cashAppreciationRateElement, event: 'keydown', handler: handleKeyDown }
+                    ] : []),
+                    ...(plantValueElement ? [
+                        { element: plantValueElement, event: 'input', handler: handleInputEvent },
+                        { element: plantValueElement, event: 'blur', handler: handleBlur },
+                        { element: plantValueElement, event: 'keydown', handler: handleKeyDown }
+                    ] : []),
+                    ...(plantAppreciationRateElement ? [
+                        { element: plantAppreciationRateElement, event: 'input', handler: handleInputEvent },
+                        { element: plantAppreciationRateElement, event: 'blur', handler: handleBlur },
+                        { element: plantAppreciationRateElement, event: 'keydown', handler: handleKeyDown }
+                    ] : []),
+                    ...(revenueElement ? [
+                        { element: revenueElement, event: 'input', handler: handleInputEvent },
+                        { element: revenueElement, event: 'blur', handler: handleBlur },
+                        { element: revenueElement, event: 'keydown', handler: handleKeyDown }
+                    ] : []),
+                    ...(revenueIncreaseRateElement ? [
+                        { element: revenueIncreaseRateElement, event: 'input', handler: handleInputEvent },
+                        { element: revenueIncreaseRateElement, event: 'blur', handler: handleBlur },
+                        { element: revenueIncreaseRateElement, event: 'keydown', handler: handleKeyDown }
+                    ] : []),
+                    ...(postSaleRevenueElement ? [
+                        { element: postSaleRevenueElement, event: 'input', handler: handleInputEvent },
+                        { element: postSaleRevenueElement, event: 'blur', handler: handleBlur },
+                        { element: postSaleRevenueElement, event: 'keydown', handler: handleKeyDown }
+                    ] : []),
+                    ...(postSaleRevenueRateElement ? [
+                        { element: postSaleRevenueRateElement, event: 'input', handler: handleInputEvent },
+                        { element: postSaleRevenueRateElement, event: 'blur', handler: handleBlur },
+                        { element: postSaleRevenueRateElement, event: 'keydown', handler: handleKeyDown }
+                    ] : []),
+                    ...(saleYearElement ? [
+                        { element: saleYearElement, event: 'input', handler: handleInputEvent },
+                        { element: saleYearElement, event: 'blur', handler: handleBlur },
+                        { element: saleYearElement, event: 'keydown', handler: handleKeyDown }
+                    ] : []),
+                    ...(saleValueElement ? [
+                        { element: saleValueElement, event: 'input', handler: handleInputEvent },
+                        { element: saleValueElement, event: 'blur', handler: handleBlur },
+                        { element: saleValueElement, event: 'keydown', handler: handleKeyDown }
+                    ] : []),
+                    ...(removeButton ? [
+                        { element: removeButton, event: 'click', handler: removeHandler },
+                        { element: removeButton, event: 'keydown', handler: (e) => {
+                            if (e.key === 'Enter') {
+                                e.preventDefault();
+                            }
+                            if (e.key === 'Space') {
+                                console.log(`Focus: Space pressed on remove button for account ${index}`);
+                                removeHandler(e);
+                            }
+                        }}
+                    ] : [])
+                );
+            });
+        }
+
+        // Activate the defined functions and Run Model capability
+        window.addEventListener('load', async () => {
+            console.log("Load event started");
+
+            if (!window.solanaWeb3 || !window.BN || !window.Buffer) {
+                console.error("Libraries not loaded—check paths!");
+                return;
+            }
+
+            // Initialize the global wallet object
+            if (window.solana) {
+                try {
+                    await window.solana.connect();
+                    wallet.publicKey = window.solana.publicKey;
+                    console.log("Wallet connected:", wallet.publicKey.toBase58());
+                } catch (error) {
+                    console.error("Wallet connection failed:", error);
+                    wallet.publicKey = null;
+                }
+            } else {
+                console.log("No wallet detected");
+            }
+
+            // Use the functions to build the fore and back -ground features
+            renderInputs();
+            console.log("renderInputs completed");
+            renderAccounts();
+            console.log("renderAccounts completed");
+
+            const rateModelSelect = document.getElementById('rate-model');
+            const runButton = document.getElementById('run');
+
+            if (!runButton) {
+                console.error("Run button not found");
+                return;
+            }
+
+            runButton.addEventListener('click', async () => {
+                console.log("Run Model button explicitly clicked");
+                try {
+                    const graphData = await runMultiYearModel();
+                } catch (error) {
+                    console.error("Run Model failed:", error);
+                }
+            });
+
+            rateModelSelect.addEventListener('change', (e) => {
+                const rateModel = e.target.value;
+                console.log("Rate model changed to:", rateModel);
+                clearPlots();
+            });
+
+            console.log("Load event completed");
+        });
+
+        // Serialize and deserialize data, send to and receive from the chain
+        async function runMultiYearModel() {
+            const errorDiv = document.getElementById('error-message');
+            if (errorDiv) {
+                errorDiv.textContent = '';
+            } else {
+                console.warn("error-message div not found");
+            }
+
+            clearPlots();
+
+            const startYear = state.model.start_year;
+            const endYear = state.model.end_year;
+            const pension = state.model.pension;
+            const salary = state.model.salary;
+            const investPaid = state.model.invest_paid;
+            const inflationRate = state.model.inflation_rate;
+            let spending = state.model.spending;
+            const age = state.model.age;
+            const rateModel = state.model.rateModel || 'fixed';
+            const spread = state.model.spread || 2;
+            const cyclePeriod = state.model.cyclePeriod || 5;
+
+            console.log(`Running model with rateModel: ${rateModel}, spread: ${spread}, cyclePeriod: ${cyclePeriod}`);
+
+            const { inflation_rates } = computeRates(
+                startYear,
+                endYear,
+                inflationRate,
+                spread,
+                rateModel,
+                cyclePeriod
+            );
+
+            const years = state.model.end_year - state.model.start_year + 1;
+
+            const sparseRifRates = [];
+            for (let i = 0; i < years; i += 5) {
+                const age = state.model.age + i;
+                sparseRifRates.push(get_rif_rate(age) / 100.0);
+            }
+
+            const fullRifRates = [];
+            for (let i = 0; i < years; i++) {
+                const idx = Math.floor(i / 5);
+                if (i % 5 === 0) {
+                    fullRifRates.push(sparseRifRates[idx]);
+                } else {
+                    const prev = sparseRifRates[idx];
+                    const next = sparseRifRates[idx + 1] || sparseRifRates[idx];
+                    const t = (i % 5) / 5;
+                    fullRifRates.push(prev + t * (next - prev));
+                }
+            }
+
+            if (!window.solana || !window.solana.isConnected || !wallet.publicKey) {
+                const errorMessage = "Please connect your wallet to proceed.";
+                console.error(errorMessage);
+                if (errorDiv) {
+                    errorDiv.textContent = errorMessage;
+                }
+                throw new Error(errorMessage);
+            }
+
+            const accountTypesPresent = {
+                RIF: false,
+                Business: false,
+                RealEstate: false,
+                Investment: false
+            };
+
+            const accountsArray = JSON.parse(JSON.stringify(state.model.accounts));
+
+            accountsArray.forEach(account => {
+                if (account.type === 'RIF') accountTypesPresent.RIF = true;
+                else if (account.type === 'Business') accountTypesPresent.Business = true;
+                else if (account.type === 'RealEstate') accountTypesPresent.RealEstate = true;
+                else if (account.type === 'Investment') accountTypesPresent.Investment = true;
+            });
+
+            let rif_balances = [];
+            let business_balances = [];
+            let real_estate_balances = [];
+            let invest_balances = [];
+            let business_sold_flags = [];
+            let business_indices = [];
+
+            accountsArray.forEach((account, i) => {
+                if (account.type === 'RIF') {
+                    rif_balances.push({
+                        balance: account.start_value,
+                        drawdown_start_year: account.drawdown_start_year,
+                        appreciation_rate: account.appreciation_rate / 100.0
+                    });
+                } else if (account.type === 'Business') {
+                    business_balances.push({
+                        cash: account.cash_value,
+                        cash_appreciation_rate: account.cash_appreciation_rate / 100.0,
+                        plant: account.plant_value,
+                        plant_appreciation_rate: account.plant_appreciation_rate / 100.0,
+                        revenue: account.revenue || 0,
+                        revenue_increase_rate: (account.revenue_increase_rate || state.model.inflation_rate) / 100.0,
+                        post_sale_revenue: account.post_sale_revenue || 0,
+                        post_sale_revenue_rate: (account.post_sale_revenue_rate || state.model.inflation_rate) / 100.0
+                    });
+                    business_sold_flags.push(false);
+                    business_indices.push(i);
+                } else if (account.type === 'RealEstate') {
+                    real_estate_balances.push({
+                        balance: account.start_value,
+                        appreciation_rate: account.appreciation_rate / 100.0,
+                        sold: false
+                    });
+                } else if (account.type === 'Investment') {
+                    invest_balances.push({
+                        balance: account.start_value,
+                        appreciation_rate: account.appreciation_rate / 100.0
+                    });
+                }
+            });
+
+            let plot_data = [];
+            let inflation_factor = 1.0;
+            let total_rif_balance = 0.0;
+            let total_business_balance = 0.0;
+            let total_real_estate_balance = 0.0;
+            let total_invest_balance = invest_balances.reduce((sum, val) => sum + val.balance, 0);
+
+            let second_salary = state.model.second_salary;
+            const second_salary_start_year = accountsArray.find(acc => acc.type === 'Business')?.sale_year || state.model.start_year;
+            let second_salary_growth_rate = (state.model.second_salary_growth_rate || state.model.inflation_rate) / 100.0;
+
+            const debugLog = (year, message, data) => {
+                if (year >= 2025) {
+                    console.log(`Year ${year}: ${message}`, data);
+                }
+            };
+
+            for (let year_idx = 0; year_idx < years; year_idx++) {
+                const year = startYear + year_idx;
+
+                if (year >= 2025) {
+                    debugLog(year, "Invest Balance Start", { balance: invest_balances[0]?.balance || 0 });
+                }
+
+                const inflation = year > startYear ? inflation_rates[year_idx] : 0;
+                inflation_factor *= (year > startYear ? 1.0 + inflation : 1.0);
+                const pension_adj = pension * inflation_factor;
+                const salary_adj = business_sold_flags.every(sold => sold) ? 0 : salary * inflation_factor;
+                const spending_adj = spending * inflation_factor;
+                const invest_paid_adj = investPaid * inflation_factor;
+
+                // Compute adjusted appreciation rates based on rate model
+                let adjustedAppreciationRateInvest = 0;
+                let adjustedAppreciationRateRif = 0;
+                let adjustedAppreciationRateBusinessCash = 0;
+                let adjustedAppreciationRateSecondSalary = second_salary_growth_rate;
+
+                if (rateModel === 'fixedSpread') {
+                    const spreadFraction = spread / 100.0;
+                    const randomSpread = (Math.random() * 2 - 1) * spreadFraction;
+                    const adjustedRate = inflation + randomSpread;
+                    adjustedAppreciationRateInvest = adjustedRate;
+                    adjustedAppreciationRateRif = adjustedRate;
+                    adjustedAppreciationRateBusinessCash = adjustedRate;
+                    adjustedAppreciationRateSecondSalary = adjustedRate;
+                } else if (rateModel === 'cyclic') {
+                    const amplitude = spread / 100.0;
+                    const omega = (2 * Math.PI) / cyclePeriod;
+                    const yearOffset = year_idx % cyclePeriod;
+                    const variation = amplitude * Math.sin(omega * yearOffset);
+                    const adjustedRate = inflation + variation;
+                    adjustedAppreciationRateInvest = adjustedRate;
+                    adjustedAppreciationRateRif = adjustedRate;
+                    adjustedAppreciationRateBusinessCash = adjustedRate;
+                    adjustedAppreciationRateSecondSalary = adjustedRate;
+                } else {
+                    // Fixed model: use user-defined rates
+                    adjustedAppreciationRateInvest = invest_balances.length > 0 ? invest_balances[0].appreciation_rate : 0;
+                    adjustedAppreciationRateRif = rif_balances.length > 0 ? rif_balances[0].appreciation_rate : 0;
+                    adjustedAppreciationRateBusinessCash = business_balances.length > 0 ? business_balances[0].cash_appreciation_rate : 0;
+                }
+
+                let base_annual_income = 0.0;
+
+                total_rif_balance = 0.0;
+                let total_rif_payout = 0.0;
+                for (let i = 0; i < rif_balances.length; i++) {
+                    let rif = rif_balances[i];
+                    let rif_balance = rif.balance;
+                    const rif_payout = year >= rif.drawdown_start_year ? rif_balance * fullRifRates[year_idx] : 0;
+                    rif_balance -= rif_payout;
+                    rif_balance *= (year > startYear ? 1.0 + adjustedAppreciationRateRif : 1.0);
+                    rif_balances[i].balance = rif_balance;
+                    total_rif_balance += rif_balance;
+                    total_rif_payout += rif_payout;
+                    debugLog(year, "RIF Details", {
+                        balance: rif_balance,
+                        payout: rif_payout,
+                        drawdown_start_year: rif.drawdown_start_year
+                    });
+                }
+                base_annual_income += total_rif_payout;
+
+                total_business_balance = 0.0;
+                try {
+                    console.log(`Year ${year}: Accounts type before revenue block: ${typeof accountsArray}, Length: ${accountsArray.length}`);
+                    let temp_balances = business_balances.map(b => ({ ...b }));
+                    for (let i = 0; i < temp_balances.length; i++) {
+                        let business = temp_balances[i];
+                        const sold = business_sold_flags[i];
+                        if (!sold) {
+                            const account = accountsArray[business_indices[i]];
+                            let revenue = business.revenue;
+                            if (year > startYear) {
+                                revenue *= (1.0 + business.revenue_increase_rate);
+                            }
+                            business.revenue = revenue;
+
+                            const base_salary = state.model.salary;
+                            const salary = base_salary * inflation_factor;
+                            if (isNaN(salary) || salary < 0) {
+                                errorDiv.textContent = `Invalid salary in year ${year}`;
+                                business.cash = 0;
+                                continue;
+                            }
+
+                            if (invest_balances.length > 0) {
+                                invest_balances[0].balance += salary;
+                            } else {
+                                invest_balances.push({ balance: salary, appreciation_rate: 0 });
+                            }
+                            total_invest_balance = invest_balances.reduce((sum, val) => sum + val.balance, 0);
+
+                            let base_cash = business.cash;
+                            if (year > startYear) {
+                                base_cash *= (1.0 + adjustedAppreciationRateBusinessCash);
+                            }
+                            const net_revenue = revenue - salary;
+                            const new_cash = base_cash + net_revenue;
+                            if (new_cash < 0) {
+                                errorDiv.textContent = `Negative business cash in year ${year}`;
+                                business.cash = 0;
+                            } else {
+                                business.cash = new_cash;
+                            }
+                            business.plant *= (year > startYear ? 1.0 + business.plant_appreciation_rate : 1.0);
+
+                            debugLog(year, "Business Revenue", {
+                                revenue,
+                                salary,
+                                base_cash,
+                                net_revenue,
+                                new_cash,
+                                plant: business.plant,
+                                invest_balance: invest_balances[0]?.balance
+                            });
+
+                            temp_balances[i] = business;
+                        }
+                        total_business_balance += sold ? 0 : (temp_balances[i].cash + temp_balances[i].plant);
+                    }
+                    business_balances = temp_balances;
+                    debugLog(year, "Post-Loop Business Balances", { cash: business_balances[0]?.cash });
+                } catch (error) {
+                    console.error("Year:", year, "Revenue Block Error:", error);
+                    errorDiv.textContent = `Calculation error in year ${year}`;
+                }
+
+                total_real_estate_balance = 0.0;
+                for (let i = 0; i < real_estate_balances.length; i++) {
+                    let real_estate = real_estate_balances[i];
+                    if (!real_estate.sold) {
+                        real_estate.balance *= (year > startYear ? 1.0 + real_estate.appreciation_rate : 1.0);
+                        total_real_estate_balance += real_estate.balance;
+                    }
+                    real_estate_balances[i] = real_estate;
+                }
+
+                for (let i = 0; i < invest_balances.length; i++) {
+                    let invest = invest_balances[i];
+                    invest.balance *= (year > startYear ? 1.0 + adjustedAppreciationRateInvest : 1.0);
+                    invest_balances[i] = invest;
+                }
+                total_invest_balance = invest_balances.reduce((sum, val) => sum + val.balance, 0);
+
+                debugLog(year, "Pre-Sale", { business_cash: business_balances[0]?.cash });
+
+                accountsArray.forEach((account, i) => {
+                    if (year === account.sale_year) {
+                        let sale_value = account.sale_value;
+                        if (account.type === 'Business') {
+                            const business_idx = business_indices.indexOf(i);
+                            const business = business_balances[business_idx];
+                            if (sale_value === 'default') {
+                                sale_value = business.cash + business.plant;
+                            } else {
+                                sale_value = Number(sale_value);
+                                if (isNaN(sale_value) || sale_value < 0) {
+                                    sale_value = 0;
+                                    errorDiv.textContent = `Invalid sale value for business in year ${year}`;
+                                }
+                            }
+                            debugLog(year, "Business Sale", { cash: business.cash, plant: business.plant, sale_value });
+
+                            if (invest_balances.length > 0) {
+                                invest_balances[0].balance += sale_value;
+                            } else {
+                                invest_balances.push({ balance: sale_value, appreciation_rate: 0 });
+                            }
+                            total_invest_balance = invest_balances.reduce((sum, val) => sum + val.balance, 0);
+
+                            business_balances[business_idx] = {
+                                cash: 0,
+                                cash_appreciation_rate: 0,
+                                plant: 0,
+                                plant_appreciation_rate: 0,
+                                revenue: business_balances[business_idx].revenue,
+                                revenue_increase_rate: business_balances[business_idx].revenue_increase_rate,
+                                post_sale_revenue: business_balances[business_idx].post_sale_revenue,
+                                post_sale_revenue_rate: business_balances[business_idx].post_sale_revenue_rate
+                            };
+                            business_sold_flags[business_idx] = true;
+                            total_business_balance = business_balances.reduce((sum, val, idx) => sum + (business_sold_flags[idx] ? 0 : (val.cash + val.plant)), 0);
+                        } else if (account.type === 'RealEstate') {
+                            sale_value = Number(sale_value);
+                            if (isNaN(sale_value) || sale_value < 0) {
+                                sale_value = 0;
+                                errorDiv.textContent = `Invalid sale value for real estate in year ${year}`;
+                            }
+                            const real_estate_idx = accountsArray.filter((acc, idx) => acc.type === 'RealEstate' && idx <= i).length - 1;
+                            if (invest_balances.length > 0) {
+                                invest_balances[0].balance += sale_value;
+                            } else {
+                                invest_balances.push({ balance: sale_value, appreciation_rate: 0 });
+                            }
+                            total_invest_balance = invest_balances.reduce((sum, val) => sum + val.balance, 0);
+                            real_estate_balances[real_estate_idx].sold = true;
+                            total_real_estate_balance = real_estate_balances.reduce((sum, val) => sum + (val.sold ? 0 : val.balance), 0);
+                        }
+                    }
+                });
+
+                business_sold_flags.forEach((sold, i) => {
+                    if (sold) {
+                        const account = accountsArray[business_indices[i]];
+                        let post_sale_revenue = account.post_sale_revenue || 0;
+                        const post_sale_revenue_rate = account.post_sale_revenue_rate / 100.0;
+                        if (year > account.sale_year) {
+                            post_sale_revenue *= (1.0 + post_sale_revenue_rate);
+                            if (post_sale_revenue < 0) post_sale_revenue = 0;
+                            account.post_sale_revenue = post_sale_revenue;
+                        }
+                        if (year >= account.sale_year && post_sale_revenue > 0) {
+                            if (invest_balances.length > 0) {
+                                invest_balances[0].balance += post_sale_revenue;
+                            } else {
+                                invest_balances.push({ balance: post_sale_revenue, appreciation_rate: 0 });
+                            }
+                            total_invest_balance = invest_balances.reduce((sum, val) => sum + val.balance, 0);
+                            debugLog(year, "Post-Sale Revenue", {
+                                post_sale_revenue,
+                                invest_balance: invest_balances[0]?.balance,
+                                year,
+                                sale_year: account.sale_year
+                            });
+                        }
+                    }
+                });
+
+                if (year >= second_salary_start_year) {
+                    second_salary *= (year > startYear ? 1.0 + adjustedAppreciationRateSecondSalary : 1.0);
+                    if (second_salary < 0) second_salary = 0;
+                    base_annual_income += second_salary;
+                    if (second_salary > 0) {
+                        if (invest_balances.length > 0) {
+                            invest_balances[0].balance += second_salary;
+                        } else {
+                            invest_balances.push({ balance: second_salary, appreciation_rate: 0 });
+                        }
+                        total_invest_balance = invest_balances.reduce((sum, val) => sum + val.balance, 0);
+                    }
+                }
+
+                base_annual_income += pension_adj + salary_adj + invest_paid_adj;
+                if (year >= 2025) {
+                    debugLog(year, "Invest Balance End", {
+                        balance: invest_balances[0]?.balance || 0,
+                        base_annual_income,
+                        post_sale_revenue: accountsArray.find(acc => acc.type === 'Business')?.post_sale_revenue || 0
+                    });
+                }
+
+                const shortfall = spending_adj - base_annual_income;
+                if (year >= 2025) {
+                    debugLog(year, "Shortfall Calculated", {
+                        shortfall: spending_adj - base_annual_income,
+                        spending_adj,
+                        base_annual_income,
+                        pension_adj,
+                        invest_paid_adj,
+                        salary_adj
+                    });
+                }
+                if (shortfall != 0) {
+                    let remaining_shortfall = shortfall;
+                    for (let i = 0; i < invest_balances.length; i++) {
+                        if (remaining_shortfall == 0) break;
+                        if (remaining_shortfall > 0) {
+                            const withdraw = Math.min(remaining_shortfall, invest_balances[i].balance);
+                            invest_balances[i].balance = Math.max(0, invest_balances[i].balance - withdraw);
+                            remaining_shortfall -= withdraw;
+                            if (year >= 2025) {
+                                debugLog(year, "Shortfall Withdraw", { withdraw, new_balance: invest_balances[i].balance });
+                            }
+                        } else {
+                            const surplus = Math.min(-remaining_shortfall, pension_adj + invest_paid_adj);
+                            invest_balances[i].balance += surplus;
+                            remaining_shortfall += surplus;
+                            if (year >= 2025) {
+                                debugLog(year, "Surplus Added", { surplus, new_balance: invest_balances[i].balance });
+                            }
+                        }
+                    }
+                    total_invest_balance = invest_balances.reduce((sum, val) => sum + val.balance, 0);
+                }
+
+                const total_balance_after_spending = total_rif_balance + total_business_balance + total_real_estate_balance + total_invest_balance;
+                const remaining_after_spending = total_balance_after_spending;
+
+                const dataPoint = {
+                    year: year,
+                    rif_end: total_rif_balance,
+                    business_end: total_business_balance,
+                    invest_end: total_invest_balance,
+                    remaining: remaining_after_spending,
+                    total_income: spending_adj
+                };
+                if (accountTypesPresent.RealEstate) {
+                    dataPoint.real_estate_end = total_real_estate_balance;
+                }
+
+                plot_data.push(dataPoint);
+            }
+
+            let plotData = [];
+            for (let i = 0; i < years; i++) {
+                plotData.push(plot_data[i]);
+            }
+
+            plotGraph(plotData.length ? plotData : []);
+            return plotData;
+        }
+
+        // Change data from the chain output to visuals
+        function plotGraph(data) {
+            const svgElement = d3.select("#graph svg");
+            svgElement.selectAll("*").remove();
+
+            if (!data.length) {
+                svgElement.append("text")
+                    .attr("x", 400).attr("y", 200)
+                    .attr("text-anchor", "middle")
+                    .text("No data to plot—check program logs");
+                console.warn("No data to plot");
+                return;
+            }
+
+            const margin = { top: 40, right: 60, bottom: 120, left: 60 };
+            const width = 800 - margin.left - margin.right;
+            const height = 400 - margin.top - margin.bottom;
+
+            svgElement.attr("width", 800);
+
+            const validData = data.filter(d => d.year !== undefined && (
+                d.remaining !== undefined || d.rif_end !== undefined || 
+                d.business_end !== undefined || d.real_estate_end !== undefined || 
+                d.invest_end !== undefined || d.total_income !== undefined
+            ));
+
+            if (!validData.length) {
+                svgElement.append("text")
+                    .attr("x", 400).attr("y", 200)
+                    .attr("text-anchor", "middle")
+                    .text("Invalid data format—check parsing");
+                return;
+            }
+
+            const startYear = state.model.start_year;
+            const endYear = state.model.end_year;
+
+            const plotData = validData.filter(d => d.year >= startYear && d.year <= endYear);
+
+            const accountTypesPresent = {
+                rif_end: plotData.some(d => d.rif_end !== undefined && d.rif_end > 0),
+                business_end: plotData.some(d => d.business_end !== undefined && d.business_end > 0),
+                real_estate_end: plotData.some(d => d.real_estate_end !== undefined && d.real_estate_end > 0), // Ensure non-zero
+                invest_end: plotData.some(d => d.invest_end !== undefined && d.invest_end > 0)
+            };
+
+            const x = d3.scaleLinear()
+                .domain([startYear, endYear])
+                .range([0, width])
+                .nice();
+
+            const y = d3.scaleLinear()
+                .domain([0, d3.max(validData, d => Math.max(
+                    (d.rif_end || 0),
+                    (d.business_end || 0),
+                    (d.real_estate_end || 0),
+                    (d.invest_end || 0),
+                    (d.remaining || 0),
+                    (d.total_income || 0)
+                )) * 1.1 || 1])
+                .range([height, 0]);
+
+            const g = svgElement.append("g")
+                .attr("transform", `translate(${margin.left},${margin.top})`);
+
+            const lines = {};
+            if (accountTypesPresent.rif_end) lines.rif_end = d3.line().x(d => x(d.year)).y(d => y(d.rif_end || 0));
+            if (accountTypesPresent.business_end) lines.business_end = d3.line().x(d => x(d.year)).y(d => y(d.business_end || 0));
+            if (accountTypesPresent.real_estate_end) lines.real_estate_end = d3.line().x(d => x(d.year)).y(d => y(d.real_estate_end || 0));
+            if (accountTypesPresent.invest_end) lines.invest_end = d3.line().x(d => x(d.year)).y(d => y(d.invest_end || 0));
+            lines.remaining = d3.line().x(d => x(d.year)).y(d => y(d.remaining || 0));
+            lines.annual_income = d3.line().x(d => x(d.year)).y(d => y(d.total_income || 0));
+
+            const colors = { 
+                rif_end: "red", 
+                business_end: "purple", 
+                real_estate_end: "blue",
+                invest_end: "orange", 
+                remaining: "green",
+                annual_income: "cyan"
+            };
+
+            const tooltip = d3.select("body").append("div")
+                .attr("class", "tooltip")
+                .style("position", "absolute")
+                .style("background", "rgba(0, 0, 0, 0.8)")
+                .style("color", "white")
+                .style("padding", "8px")
+                .style("border-radius", "5px")
+                .style("font-size", "12px")
+                .style("pointer-events", "none")
+                .style("opacity", 0);
+
+            Object.entries(lines).forEach(([key, line]) => {
+                const pathData = line(plotData);
+                g.append("path")
+                    .datum(plotData)
+                    .attr("fill", "none")
+                    .attr("stroke", colors[key])
+                    .attr("stroke-width", key === "remaining" ? 3 : 2)
+                    .attr("d", pathData)
+                    .on("mouseover", function(event, d) {
+                        d3.select(this).attr("stroke-width", key === "remaining" ? 5 : 4);
+                        tooltip.transition().duration(200).style("opacity", 0.9);
+                    })
+                    .on("mousemove", function(event, d) {
+                        const [xPos, yPos] = d3.pointer(event);
+                        const year = Math.round(x.invert(xPos));
+                        const dataPoint = validData.find(d => d.year === year);
+                        if (dataPoint) {
+                            const value = key === "annual_income" ? dataPoint.total_income : dataPoint[key];
+                            tooltip.html(`${key === "annual_income" ? "Annual Income/Spending" : key}: ${Math.round(value || 0)} CAD<br>Year: ${year}`)
+                                .style("left", (event.pageX + 10) + "px")
+                                .style("top", (event.pageY - 10) + "px");
+                        }
+                    })
+                    .on("mouseout", function() {
+                        d3.select(this).attr("stroke-width", key === "remaining" ? 3 : 2);
+                        tooltip.transition().duration(500).style("opacity", 0);
+                    });
+            });
+
+            g.append("g")
+                .call(d3.axisLeft(y).ticks(5))
+                .append("text")
+                .attr("fill", "black")
+                .attr("transform", "rotate(-90)")
+                .attr("y", 6)
+                .attr("dy", "0.71em")
+                .attr("text-anchor", "end")
+                .text("Amount (CAD)");
+
+            g.append("g")
+                .attr("transform", `translate(0,${height})`)
+                .call(d3.axisBottom(x).ticks(5).tickFormat(d3.format(".0f")))
+                .selectAll("text")
+                .attr("transform", "translate(-10,0) rotate(-45)")
+                .style("text-anchor", "end");
+
+            svgElement.append("text")
+                .attr("x", width / 2 + margin.left)
+                .attr("y", margin.top - 20)
+                .attr("text-anchor", "middle")
+                .text("Retirement Income Projection");
+
+            const legendItems = [];
+            if (accountTypesPresent.rif_end) legendItems.push("RIF End");
+            if (accountTypesPresent.business_end) legendItems.push("Business End");
+            if (accountTypesPresent.real_estate_end) legendItems.push("Real Estate End");
+            if (accountTypesPresent.invest_end) legendItems.push("Invest End");
+            legendItems.push("Remaining", "Annual Income/Spending");
+
+            const legend = svgElement.append("g")
+                .attr("font-family", "sans-serif")
+                .attr("font-size", 10)
+                .attr("text-anchor", "start")
+                .selectAll("g")
+                .data(legendItems)
+                .enter().append("g");
+
+            legend.attr("transform", (d, i) => {
+                const itemsPerRow = 4;
+                const row = Math.floor(i / itemsPerRow);
+                const col = i % itemsPerRow;
+                return `translate(${margin.left + col * 150},${height + margin.top + 50 + row * 20})`;
+            });
+
+            legend.append("rect")
+                .attr("x", 0)
+                .attr("width", 19)
+                .attr("height", 19)
+                .attr("fill", (d, i) => colors[Object.keys(lines)[i]]);
+
+            legend.append("text")
+                .attr("x", 24)
+                .attr("y", 9.5)
+                .attr("dy", "0.32em")
+                .text(d => d);
+
+            svgElement.append("text")
+                .attr("x", width / 2 + margin.left)
+                .attr("y", height + margin.top + 100)
+                .attr("text-anchor", "middle")
+                .attr("font-size", "12px")
+                .attr("fill", "black")
+                .text("Note: The model balances income and spending by adjusting investments. Watch the Remaining line to see if funds run out before the end year.");
+        }
+
+        // Disable arrow keys for increments on value fields
+        document.addEventListener('DOMContentLoaded', () => {
+            const currencyInputs = document.querySelectorAll('.currency-input');
+            currencyInputs.forEach(input => {
+                input.addEventListener('keydown', (e) => {
+                    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+                        e.preventDefault();
+                    }
+                });
+            });
+        });
+    </script>
+</body>
+</html>
