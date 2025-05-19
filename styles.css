@@ -1,0 +1,196 @@
+/* styles.css */
+
+/* General Styles */
+body {
+    background-color: #C0C0C0;
+    font-family: Arial, sans-serif;
+}
+
+/* Inputs Section */
+#inputs { /* the # is an id selector used to style items with an id="inputs" frequently an input item */
+    margin: 20px;
+    visibility: visible !important;
+    display: block !important;
+}
+
+.input-section { /* the . is a class selector used to style items having a class="input-section" */
+    display: flex;
+    flex-direction: column;
+    gap: 15px; /* Space between Personal Situation, Incomes, Spending */
+}
+
+.personal-situation,
+.incomes,
+.spending {
+    background: #008080; /* Keep teal consistent */
+    padding: 3px;
+}
+
+.personal-situation h4,
+.incomes h4,
+.spending h4 {
+    color: #fff; /* White for contrast */
+    margin: 0 0 10px 0; /* Outside colored rows */
+    font-size: 16px;
+}
+
+.input-row {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    background: #00CED1; /* Lighter teal for rows, like buttons */
+    padding: 5px;
+    border-radius: 3px;
+}
+
+.input-column { /* New class for consistency with accounts */
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 100px;
+}
+
+.input-column label {
+    font-weight: bold;
+    color: #fff;
+    display: inline-block;
+    min-width: 100px;
+}
+
+.input-column input[type="text"], /* used to test restyling of input boxes */
+.input-column input[type="number"],
+.input-column input[type="range"],
+.input-column select {
+    width: 100px;
+    padding: 3px;
+    border: 1px solid #000;
+    border-radius: 3px;
+}
+
+/* Accounts Section */
+#accounts {
+    margin: 20px;
+    visibility: visible !important;
+    display: block !important;
+}
+
+.account {
+    margin-bottom: 20px;
+    padding: 10px;
+    background: #008080;
+    border-radius: 5px;
+}
+
+.accounts-container {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.account-row {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    background: #00CED1; /* Lighter teal for consistency */
+    padding: 5px;
+    border-radius: 3px;
+}
+
+.account-column {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 100px;
+}
+
+.account-column label {
+    font-weight: bold;
+    color: #fff;
+    display: inline-block;
+    min-width: 100px;
+}
+
+.account-column input,
+.account-column select {
+    width: 100px;
+    padding: 3px;
+    border: 1px solid #000;
+    border-radius: 3px;
+}
+
+.account-actions {
+    display: flex;
+    align-items: center;
+}
+
+.remove-button {
+    padding: 5px 10px;
+    background: #fff;
+    color: #000;
+    font-weight: bold;
+    border: 1px solid #000;
+    border-radius: 3px;
+    cursor: pointer;
+}
+
+.remove-button:hover {
+    background: #00B7EB;
+}
+
+.add-button {
+    margin: 10px 0;
+    text-align: left;
+}
+
+.add-button button {
+    padding: 5px 15px;
+    background: #000;
+    color: white;
+    font-weight: bold;
+    border:  1px solid #000;
+    border-radius: 3px;
+    cursor: pointer;
+}
+
+.add-button button:hover {
+    background: #00B7EB;
+}
+
+/* Controls Section */
+#controls {
+    margin: 20px;
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    visibility: visible !important;
+    pointer-events: auto !important;
+}
+
+#run {
+    padding: 5px 15px;
+    color: #000;
+    font-size: large;
+    font-weight: bold;
+    border:  1px solid #000;
+    border-radius: 3px;
+    cursor: pointer;
+    visibility: visible !important;
+    pointer-events: auto !important;
+}
+
+#run:hover {
+    background: #00B7EB;
+}
+
+/* Tooltip */
+.tooltip {
+    position: absolute;
+    background: rgba(0, 0, 0, 0.8);
+    color: white;
+    padding: 8px;
+    border-radius: 5px;
+    font-size: 12px;
+    pointer-events: none;
+}
