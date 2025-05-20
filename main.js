@@ -1,3 +1,5 @@
+/* The code needed to start the dApp by verifying connection with the wallet */
+
 import { connectWallet, verifyWallets, updateWalletStatus } from './solanaIntegration.js';
 
 async function init() {
