@@ -7,7 +7,12 @@
 import { Connection, PublicKey } from '@solana/web3.js';
 
 // Initialize Solana connection (Devnet for now).  The 'confirmed' is the commitment level 
-const connection = new Connection('https://api.devnet.solana.com', 'confirmed');
+const connection = new window.solanaWeb3.Connection('https://api.devnet.solana.com', 'confirmed');
+
+/* lines from the original code tha is yet to be matched into the file
+        let wallet = { publicKey: null, keypair: null }; // Define wallet globally
+        const PROGRAM_ID = new window.solanaWeb3.PublicKey("52UBAneHVYsa3C2kQiitp6SE4PZJ3nW6jdzcdSvm2yrw");
+*/
 
 // Function to connect to a wallet (e.g., Phantom)
 export async function connectWallet() { // This is a reusable function that is imported by another file
