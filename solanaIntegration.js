@@ -4,23 +4,23 @@
     for a Phantom wallet */
 
     
-import { Connection, PublicKey } from '@solana/web3.js';
+// import { Connection, Keypair, PublicKey } from '@solana/web3.js';
+
+// Define wallet and program ID
+let wallet = { publicKey: null, keypair: null }; // Define wallet globally
+const PROGRAM_ID = new window.solanaWeb3.PublicKey("52UBAneHVYsa3C2kQiitp6SE4PZJ3nW6jdzcdSvm2yrw");
 
 // Initialize Solana connection (Devnet for now).  The 'confirmed' is the commitment level 
 const connection = new window.solanaWeb3.Connection('https://api.devnet.solana.com', 'confirmed');
 
-/* lines from the original code tha is yet to be matched into the file
-        let wallet = { publicKey: null, keypair: null }; // Define wallet globally
-        const PROGRAM_ID = new window.solanaWeb3.PublicKey("52UBAneHVYsa3C2kQiitp6SE4PZJ3nW6jdzcdSvm2yrw");
-*/
-
-// Function to connect to a wallet (e.g., Phantom)
+// Connect to a provider wallet (e.g., Phantom)
 export async function connectWallet() { // This is a reusable function that is imported by another file
     try {
         const provider = window.solana; // Assumes Phantom wallet
         if (!provider) throw new Error('No wallet found');
         await provider.connect();
-        const walletPublicKey = new PublicKey(provider.publicKey.toString());
+        wallet.publicKey = new window.solanaWeb3.PublicKey(provider.publicKey.toString());
+        wallet.keypair = window.solanaWeb3.Keypair.generate(); // Optional:  If your app needs a keypair
         return walletPublicKey;
     } catch (error) {
         console.error('Wallet connection failed:', error);
@@ -28,15 +28,16 @@ export async function connectWallet() { // This is a reusable function that is i
     }
 }
 
-// Function to verify wallets (payer and receiver) on-chain
-export async function verifyWallets(payerPublicKey, receiverPublicKey) {
+// Verify the provider wallet is on-chain
+export async function verifyProviderWallet() {
     try {
-        // Placeholder: Add your on-chain Rust program call here
-        // Example: Check if both wallets are valid and funded
-        const payerAccount = await connection.getAccountInfo(new PublicKey(payerPublicKey)); // An ordinary Solana RPC API using connection.getAccountInfo()
-        const receiverAccount = await connection.getAccountInfo(new PublicKey(receiverPublicKey));
-        if (!payerAccount || !receiverAccount) throw new Error('Invalid wallet');
-        return true; // Wallets are valid
+        if (!wallet.publicKey) throw new Error("Wallet not connected");
+        // Call the on-chain program to verify the provider wallet exists
+        // This is a placeholdet-replace with actual Solana program call
+        const programId = PROGRAM_ID;
+        const providerAccount = await connection.getAccountInfo(wallet.publicKey); // An ordinary Solana RPC API using connection.getAccountInfo()
+        if (!providerAccount) throw new Error("Provider wallet not found on-chain");
+        return true; // Wallet exists
     } catch (error) {
         console.error('Wallet verification failed:', error);
         throw error;

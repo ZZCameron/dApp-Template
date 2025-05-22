@@ -1,17 +1,16 @@
 /* The code needed to start the dApp by verifying connection with the wallet */
 
-import { connectWallet, verifyWallets, updateWalletStatus } from './solanaIntegration.js';
+import { connectWallet, verifyProviderWallet, updateWalletStatus } from './solanaIntegration.js';
 
 async function init() {
     try {
-        // Connect to wallet
-        const payerPublicKey = await connectWallet();
-        updateWalletStatus(`Connected: ${payerPublicKey.toString()}`);
+        // Connect to provider wallet
+        const providerPublicKey = await connectWallet();
+        updateWalletStatus(`Connected: ${providerPublicKey.toString()}`);
 
-        // Verify wallets (assuming a receiver wallet is known)
-        const receiverPublicKey = 'RECEIVER_PUBLIC_KEY_HERE'; // Replace with actual receiver
-        const isValid = await verifyWallets(payerPublicKey, receiverPublicKey);
-        if (isValid) updateWalletStatus('Wallets verified successfully');
+        // Verify the provider wallet on-chain
+        const isValid = await verifyProviderWallet();
+        if (isValid) updateWalletStatus('Provider wallet verified on-chain');
     } catch (error) {
         updateWalletStatus('Wallet setup failed');
     }
