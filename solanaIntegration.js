@@ -4,14 +4,14 @@
     for a Phantom wallet */
 
     
-// import { Connection, Keypair, PublicKey } from '@solana/web3.js';
+import { Connection, Keypair, PublicKey } from 'https://cdn.jsdelivr.net/npm/@solana/web3.js@1.91.8/+esm';;
 
 // Define wallet and program ID
 let wallet = { publicKey: null, keypair: null }; // Define wallet globally
-const PROGRAM_ID = new window.solanaWeb3.PublicKey("52UBAneHVYsa3C2kQiitp6SE4PZJ3nW6jdzcdSvm2yrw");
+const PROGRAM_ID = new PublicKey("52UBAneHVYsa3C2kQiitp6SE4PZJ3nW6jdzcdSvm2yrw");
 
 // Initialize Solana connection (Devnet for now).  The 'confirmed' is the commitment level 
-const connection = new window.solanaWeb3.Connection('https://api.devnet.solana.com', 'confirmed');
+const connection = new Connection('https://api.devnet.solana.com', 'confirmed');
 
 // Connect to a provider wallet (e.g., Phantom)
 export async function connectWallet() { // This is a reusable function that is imported by another file
@@ -19,9 +19,10 @@ export async function connectWallet() { // This is a reusable function that is i
         const provider = window.solana; // Assumes Phantom wallet
         if (!provider) throw new Error('No wallet found');
         await provider.connect();
-        wallet.publicKey = new window.solanaWeb3.PublicKey(provider.publicKey.toString());
-        wallet.keypair = window.solanaWeb3.Keypair.generate(); // Optional:  If your app needs a keypair
-        return walletPublicKey;
+        const walletPublicKey = new PublicKey(provider.publicKey.toString());
+        wallet.publicKey = walletPublicKey; //Store in global wallet object
+        wallet.keypair = Keypair.generate(); // Optional:  If your app needs a keypair
+        return wallet.publicKey;
     } catch (error) {
         console.error('Wallet connection failed:', error);
         throw error;
@@ -34,7 +35,6 @@ export async function verifyProviderWallet() {
         if (!wallet.publicKey) throw new Error("Wallet not connected");
         // Call the on-chain program to verify the provider wallet exists
         // This is a placeholdet-replace with actual Solana program call
-        const programId = PROGRAM_ID;
         const providerAccount = await connection.getAccountInfo(wallet.publicKey); // An ordinary Solana RPC API using connection.getAccountInfo()
         if (!providerAccount) throw new Error("Provider wallet not found on-chain");
         return true; // Wallet exists
